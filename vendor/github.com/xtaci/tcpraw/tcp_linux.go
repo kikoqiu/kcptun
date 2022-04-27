@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 package tcpraw
@@ -26,10 +27,13 @@ var (
 	expire              = time.Minute
 )
 
+const messagebufferlen = 2
+
 // a message from NIC
 type message struct {
-	bts  []byte
-	addr net.Addr
+	buffer [2048]byte
+	bts    []byte
+	addr   net.Addr
 }
 
 // a tcp flow information of a connection pair
@@ -57,7 +61,8 @@ type TCPConn struct {
 	handles []*net.IPConn
 
 	// packets captured from all related NICs will be delivered to this channel
-	chMessage chan message
+	chMessage       chan *message
+	chMessageBuffer chan *message
 
 	// all TCP flows
 	flowTable map[string]*tcpFlow
@@ -114,18 +119,23 @@ func (conn *TCPConn) cleaner() {
 	}
 }
 
+//do nothing
+func (conn *TCPConn) SetTruncated() {
+}
+
 // captureFlow capture every inbound packets based on rules of BPF
 func (conn *TCPConn) captureFlow(handle *net.IPConn, port int) {
 	buf := make([]byte, 2048)
-	opt := gopacket.DecodeOptions{NoCopy: true, Lazy: true}
+	tcp := &layers.TCP{}
+
+	//opt := gopacket.DecodeOptions{NoCopy: true, Lazy: true}
 	for {
 		n, addr, err := handle.ReadFromIP(buf)
 		if err != nil {
 			return
 		}
-
 		// try decoding TCP frame from buf[:n]
-		packet := gopacket.NewPacket(buf[:n], layers.LayerTypeTCP, opt)
+		/*packet := gopacket.NewPacket(buf[:n], layers.LayerTypeTCP, opt)
 		transport := packet.TransportLayer()
 		tcp, ok := transport.(*layers.TCP)
 		if !ok {
@@ -134,6 +144,17 @@ func (conn *TCPConn) captureFlow(handle *net.IPConn, port int) {
 
 		// port filtering
 		if int(tcp.DstPort) != port {
+			continue
+		}*/
+
+		if n < 20 {
+			continue
+		}
+		data := buf[:n]
+		if binary.BigEndian.Uint16(data[2:4]) != uint16(port) {
+			continue
+		}
+		if tcp.DecodeFromBytes(data, conn) != nil {
 			continue
 		}
 
@@ -167,10 +188,13 @@ func (conn *TCPConn) captureFlow(handle *net.IPConn, port int) {
 
 		// push data if it's not orphan
 		if !orphan && tcp.PSH {
-			payload := make([]byte, len(tcp.Payload))
-			copy(payload, tcp.Payload)
+			//payload := make([]byte, len(tcp.Payload))
+			msg := <-conn.chMessageBuffer
+			msg.bts = msg.buffer[:len(tcp.Payload)]
+			copy(msg.bts, tcp.Payload)
+			msg.addr = &src
 			select {
-			case conn.chMessage <- message{payload, &src}:
+			case conn.chMessage <- msg:
 			case <-conn.die:
 				return
 			}
@@ -195,7 +219,9 @@ func (conn *TCPConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 		return 0, nil, io.EOF
 	case packet := <-conn.chMessage:
 		n = copy(p, packet.bts)
-		return n, packet.addr, nil
+		addr = packet.addr
+		conn.chMessageBuffer <- packet
+		return n, addr, nil
 	}
 }
 
@@ -407,7 +433,13 @@ func Dial(network, address string) (*TCPConn, error) {
 	conn.die = make(chan struct{})
 	conn.flowTable = make(map[string]*tcpFlow)
 	conn.tcpconn = tcpconn
-	conn.chMessage = make(chan message)
+	conn.chMessage = make(chan *message, messagebufferlen)
+	mb := make([]message, messagebufferlen)
+	conn.chMessageBuffer = make(chan *message, len(mb))
+	for i := range mb {
+		conn.chMessageBuffer <- &mb[i]
+	}
+
 	conn.lockflow(tcpconn.RemoteAddr(), func(e *tcpFlow) { e.conn = tcpconn })
 	conn.handles = append(conn.handles, handle)
 	conn.opts = gopacket.SerializeOptions{
@@ -459,7 +491,13 @@ func Listen(network, address string) (*TCPConn, error) {
 	conn := new(TCPConn)
 	conn.flowTable = make(map[string]*tcpFlow)
 	conn.die = make(chan struct{})
-	conn.chMessage = make(chan message)
+	conn.chMessage = make(chan *message, messagebufferlen)
+	mb := make([]message, messagebufferlen)
+	conn.chMessageBuffer = make(chan *message, len(mb))
+	for i := range mb {
+		conn.chMessageBuffer <- &mb[i]
+	}
+
 	conn.opts = gopacket.SerializeOptions{
 		FixLengths:       true,
 		ComputeChecksums: true,
