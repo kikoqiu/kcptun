@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/pbkdf2"
 
 	"github.com/pkg/errors"
+	"github.com/pkg/profile"
 	"github.com/urfave/cli"
 	kcp "github.com/xtaci/kcp-go/v5"
 	"github.com/xtaci/kcptun/generic"
@@ -243,6 +244,10 @@ func main() {
 			Value: "", // when the value is not empty, the config path must exists
 			Usage: "config from json file, which will override the command from shell",
 		},
+		cli.BoolFlag{
+			Name:  "cpuprof",
+			Usage: "enable cpu prof",
+		},
 	}
 	myApp.Action = func(c *cli.Context) error {
 		config := Config{}
@@ -277,6 +282,10 @@ func main() {
 		config.Quiet = c.Bool("quiet")
 		config.TCP = c.Bool("tcp")
 
+		if c.Bool("cpuprof") {
+			defer profile.Start().Stop()
+		}
+		
 		if c.String("c") != "" {
 			err := parseJSONConfig(&config, c.String("c"))
 			checkError(err)
@@ -329,6 +338,11 @@ func main() {
 		log.Println("snmpperiod:", config.SnmpPeriod)
 		log.Println("quiet:", config.Quiet)
 		log.Println("tcp:", config.TCP)
+		
+		
+		if config.Quiet{
+				log.Default().SetOutput(io.Discard)
+		}
 
 		// parameters check
 		if config.SmuxVer > maxSmuxVer {
